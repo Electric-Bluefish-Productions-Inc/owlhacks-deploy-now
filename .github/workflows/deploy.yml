@@ -117,6 +117,6 @@ jobs:
             sed -i "s|__HOST__|${STUDENT_HOST}|g" "$APPDIR/compose.yml"
 
             cd "$APPDIR"
-            docker compose pull
-            docker compose up -d
+            docker-compose pull
+            docker-compose up -d
             docker image prune -f
