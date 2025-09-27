@@ -5,13 +5,12 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# Needed for GHCR push
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: deploy-${{ github.ref }}-${{ secrets.STUDENT_HOST }}
+  group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -44,6 +43,8 @@ jobs:
   deploy:
     needs: build-push
     runs-on: ubuntu-latest
+    env:
+      STUDENT_HOST: ${{ secrets.STUDENT_HOST }}
     steps:
       - name: Deploy to workshop VM
         uses: appleboy/ssh-action@v1.2.0
@@ -54,14 +55,12 @@ jobs:
           script: |
             set -euo pipefail
 
-            # Inputs provided as secrets
-            STUDENT_HOST="${{ secrets.STUDENT_HOST }}"             # e.g., student17.owlhacks-deploy-now.xyz
             IMAGE="${{ env.IMAGE_NAME }}:latest"
 
             # Ensure the shared Caddy network exists (matches your /opt/caddy stack)
             docker network inspect caddy >/dev/null 2>&1 || docker network create caddy
 
-            # Use a stable directory per student host (or per repo if you prefer)
+            # Use a stable directory per student host
             APPDIR="$HOME/apps/${STUDENT_HOST}"
             mkdir -p "$APPDIR"
 
@@ -79,18 +78,14 @@ jobs:
                   - "8080"
                 networks: [ caddy ]
                 labels:
-                  # Route this exact host to the container's 8080
                   caddy: __HOST__
                   caddy.reverse_proxy: "{{upstreams 8080}}"
             YML
 
-            # Fill in template vars
             sed -i "s|__IMAGE__|${IMAGE}|g" "$APPDIR/compose.yml"
             sed -i "s|__HOST__|${STUDENT_HOST}|g" "$APPDIR/compose.yml"
 
-            # Deploy
             cd "$APPDIR"
             docker compose pull
             docker compose up -d
-            # Optional cleanup (keeps disk usage in check)
             docker image prune -f
