@@ -1,0 +1,96 @@
+name: Build & Deploy (Laravel → Caddy docker-proxy)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Needed for GHCR push
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-${{ github.ref }}-${{ secrets.STUDENT_HOST }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push (latest + short-sha)
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: .
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to workshop VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -euo pipefail
+
+            # Inputs provided as secrets
+            STUDENT_HOST="${{ secrets.STUDENT_HOST }}"             # e.g., student17.owlhacks-deploy-now.xyz
+            IMAGE="${{ env.IMAGE_NAME }}:latest"
+
+            # Ensure the shared Caddy network exists (matches your /opt/caddy stack)
+            docker network inspect caddy >/dev/null 2>&1 || docker network create caddy
+
+            # Use a stable directory per student host (or per repo if you prefer)
+            APPDIR="$HOME/apps/${STUDENT_HOST}"
+            mkdir -p "$APPDIR"
+
+            # Write a minimal compose file with Caddy labels
+            cat > "$APPDIR/compose.yml" <<'YML'
+            version: "3.8"
+            networks:
+              caddy:
+                external: true
+            services:
+              app:
+                image: __IMAGE__
+                restart: unless-stopped
+                expose:
+                  - "8080"
+                networks: [ caddy ]
+                labels:
+                  # Route this exact host to the container's 8080
+                  caddy: __HOST__
+                  caddy.reverse_proxy: "{{upstreams 8080}}"
+            YML
+
+            # Fill in template vars
+            sed -i "s|__IMAGE__|${IMAGE}|g" "$APPDIR/compose.yml"
+            sed -i "s|__HOST__|${STUDENT_HOST}|g" "$APPDIR/compose.yml"
+
+            # Deploy
+            cd "$APPDIR"
+            docker compose pull
+            docker compose up -d
+            # Optional cleanup (keeps disk usage in check)
+            docker image prune -f
